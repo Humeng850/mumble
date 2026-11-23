@@ -29,12 +29,35 @@ jobs:
         run: |
           $url = 'https://github.com/mumble-voip/vcpkg/releases/download/2025-07_qt5/mumble_env.x64-windows-static-md.2025-07-29.9578b83ca8.7z'
           curl.exe -L --retry 3 --fail -o env.7z $url
-          & 'C:\Program Files\7-Zip\7z.exe' x env.7z -o"$env:GITHUB_WORKSPACE" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "download failed: $LASTEXITCODE" }
+          Write-Host ("downloaded: {0:N0} bytes" -f (Get-Item env.7z).Length)
+
+          $sevenZip = @(
+            "$env:ProgramFiles\7-Zip\7z.exe",
+            "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+            (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $sevenZip) { throw '7-Zip not found on runner' }
+          Write-Host "using 7z: $sevenZip"
+
+          & $sevenZip x env.7z -o"$env:GITHUB_WORKSPACE" -y
+          if ($LASTEXITCODE -ne 0) { throw "extract failed: $LASTEXITCODE" }
+
+          # 压缩包内的顶层目录是 mumble_env.<triplet>.<date>.<hash>，而 CMake 要的是 build_env
+          $inner = Get-ChildItem $env:GITHUB_WORKSPACE -Directory -Filter 'mumble_env.*' | Select-Object -First 1
+          if (-not $inner) {
+            Write-Host '--- workspace ---'
+            Get-ChildItem $env:GITHUB_WORKSPACE | ForEach-Object { Write-Host $_.Name }
+            throw 'unexpected archive layout (no mumble_env.* directory)'
+          }
+          Rename-Item -LiteralPath $inner.FullName -NewName 'build_env'
+          Write-Host ("renamed: {0} -> build_env" -f $inner.Name)
+
           $toolchain = Join-Path $env:GITHUB_WORKSPACE 'build_env\scripts\buildsystems\vcpkg.cmake'
           if (-not (Test-Path $toolchain)) {
-            Write-Host '--- workspace after extraction ---'
-            Get-ChildItem $env:GITHUB_WORKSPACE | ForEach-Object { Write-Host $_.Name }
-            throw 'build_env extraction failed (toolchain file missing)'
+            Write-Host '--- build_env ---'
+            Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'build_env') | ForEach-Object { Write-Host $_.Name }
+            throw 'toolchain file missing inside build_env'
           }
           Write-Host "toolchain ok: $toolchain"
 
