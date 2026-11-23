@@ -29,6 +29,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          MUMBLE_BUILD_NUMBER: '0'
         run: ./.github/workflows/build.sh "windows-2025" "static" "x86_64"
 
       - name: List overlay artifacts
