@@ -1,0 +1,46 @@
+name: overlay-present1
+
+on:
+  push:
+    branches: [ "fix/**" ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Set environment variables
+        shell: bash
+        run: $GITHUB_WORKSPACE/.github/workflows/set_environment_variables.sh "windows-2025" "static" "x86_64" "cl" "${{ github.workspace }}"
+
+      - uses: ./.github/actions/install-dependencies
+        with:
+          type: static
+          os: windows-2025
+          arch: x86_64
+
+      - name: Build
+        shell: bash
+        run: ./.github/workflows/build.sh "windows-2025" "static" "x86_64"
+
+      - name: List overlay artifacts
+        shell: bash
+        run: find build -iname 'mumble.exe' -o -iname 'mumble_ol*.dll' | xargs -r ls -la
+
+      - name: Upload overlay dll + client
+        uses: actions/upload-artifact@v4
+        with:
+          name: mumble-present1-1.5.915
+          path: |
+            build/**/mumble.exe
+            build/**/mumble_ol*.dll
+            build/**/mumble_ol*.pdb
+          if-no-files-found: error
