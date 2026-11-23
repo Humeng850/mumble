@@ -1,0 +1,86 @@
+name: overlay-dllonly
+
+# 只编译 mumble_ol_x64.dll（overlay），不编 Qt 客户端。
+# 上游 CI 失败的原因：它依赖 Actions 缓存里的 build_env（预编译 vcpkg 环境），
+# fork 没有这个缓存，CMake 找不到 vcpkg toolchain 就直接挂了。
+# 这里显式去下载那个环境，并用 -Dclient=OFF 跳过整个客户端（省 20 分钟）。
+
+on:
+  push:
+    branches: [ "fix/**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 1
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Fetch prebuilt vcpkg environment
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/mumble-voip/vcpkg/releases/download/2025-07_qt5/mumble_env.x64-windows-static-md.2025-07-29.9578b83ca8.7z'
+          curl.exe -L --retry 3 --fail -o env.7z $url
+          & 'C:\Program Files\7-Zip\7z.exe' x env.7z -o"$env:GITHUB_WORKSPACE" -y | Out-Null
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE 'build_env\scripts\buildsystems\vcpkg.cmake'
+          if (-not (Test-Path $toolchain)) {
+            Write-Host '--- workspace after extraction ---'
+            Get-ChildItem $env:GITHUB_WORKSPACE | ForEach-Object { Write-Host $_.Name }
+            throw 'build_env extraction failed (toolchain file missing)'
+          }
+          Write-Host "toolchain ok: $toolchain"
+
+      - name: Configure (overlay only)
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE 'build_env\scripts\buildsystems\vcpkg.cmake'
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_NUMBER=0 `
+            -Dclient=OFF -Dserver=OFF -Dplugins=OFF -Dtests=OFF -Dpackaging=OFF `
+            -Doverlay=ON -Doverlay-xcompile=OFF `
+            -Dwarnings-as-errors=OFF -Dlto=OFF `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with $LASTEXITCODE" }
+
+      - name: Build overlay target
+        shell: pwsh
+        run: |
+          cmake --build build --target overlay
+          if ($LASTEXITCODE -ne 0) { throw "build failed with $LASTEXITCODE" }
+
+      - name: Verify the DLL actually contains the patch
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem build -Recurse -Filter mumble_ol_x64.dll | Select-Object -First 1
+          if (-not $dll) { throw 'mumble_ol_x64.dll was not produced' }
+          Write-Host ("DLL: {0}  {1:N0} bytes" -f $dll.FullName, $dll.Length)
+          if ($dll.Length -lt 50000) { throw "DLL looks too small: $($dll.Length)" }
+
+          $txt = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll.FullName))
+          $needles = @(
+            'DXGI-P1: Injecting Present1 hook at',
+            'DXGI-P1: Present1 calls = %d',
+            'DXGI-P1: Present call #%d',
+            'DXGI-P1: d3d11.dll not ready, probing in background'
+          )
+          $missing = @()
+          foreach ($n in $needles) { if (-not $txt.Contains($n)) { $missing += $n } }
+          if ($missing.Count -gt 0) { throw ('patch markers missing: ' + ($missing -join ' | ')) }
+          Write-Host 'OK: Present1 patch markers are inside the DLL'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mumble_ol_x64-present1
+          path: build/**/mumble_ol_x64.dll
+          if-no-files-found: error
