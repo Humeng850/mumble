@@ -37,16 +37,22 @@
 
 #include "lib.h"
 #include <dxgi.h>
+#include <dxgi1_2.h>
 
 DXGIData *dxgi = nullptr;
 
 static bool bHooked = false;
 static HardHook hhPresent;
 static HardHook hhResize;
+// === 补丁：Present1（现代 DXGI 引擎走这条路径）===
+static HardHook hhPresent1;
+static int iPresentCalls  = 0;
+static int iPresent1Calls = 0;
 
 typedef HRESULT(__stdcall *CreateDXGIFactory1Type)(REFIID, void **);
 
 typedef HRESULT(__stdcall *PresentType)(IDXGISwapChain *, UINT, UINT);
+typedef HRESULT(__stdcall *Present1Type)(IDXGISwapChain1 *, UINT, UINT, const DXGI_PRESENT_PARAMETERS *);
 typedef HRESULT(__stdcall *ResizeBuffersType)(IDXGISwapChain *, UINT, UINT, UINT, DXGI_FORMAT, UINT);
 
 #define HMODREF(mod, func) func##Type p##func = (func##Type) GetProcAddress(mod, #func)
@@ -59,6 +65,11 @@ extern void presentD3D11(IDXGISwapChain *pSwapChain);
 
 static HRESULT __stdcall myPresent(IDXGISwapChain *pSwapChain, UINT SyncInterval, UINT Flags) {
 // Present is called for each frame. Thus, we do not want to always log here.
+	if (iPresentCalls < 5) {
+		ods("DXGI: Call to Present #%d", ++iPresentCalls);
+	} else {
+		++iPresentCalls;
+	}
 #ifdef EXTENDED_OVERLAY_DEBUGOUTPUT
 	ods("DXGI: Call to Present; Drawing and then chaining the call to the original logic");
 #endif
@@ -83,6 +94,31 @@ static HRESULT __stdcall myPresent(IDXGISwapChain *pSwapChain, UINT SyncInterval
 extern void resizeD3D10(IDXGISwapChain *pSwapChain);
 // From d3d11.cpp
 extern void resizeD3D11(IDXGISwapChain *pSwapChain);
+
+// === 补丁：Present1 的绘制钩子 ===
+static HRESULT __stdcall myPresent1(IDXGISwapChain1 *pSwapChain1, UINT SyncInterval, UINT Flags,
+									const DXGI_PRESENT_PARAMETERS *pPresentParameters) {
+	if (iPresent1Calls < 5) {
+		ods("DXGI: Call to Present1 #%d", ++iPresent1Calls);
+	} else {
+		++iPresent1Calls;
+	}
+
+	// 与 myPresent 一样：先画，再串回原逻辑
+	presentD3D10(reinterpret_cast< IDXGISwapChain * >(pSwapChain1));
+	presentD3D11(reinterpret_cast< IDXGISwapChain * >(pSwapChain1));
+
+	Present1Type oPresent1 = (Present1Type) hhPresent1.call;
+	hhPresent1.restore();
+	HRESULT hr = oPresent1(pSwapChain1, SyncInterval, Flags, pPresentParameters);
+	hhPresent1.inject();
+	return hr;
+}
+
+static void HookPresent1Raw(voidFunc vfPresent1) {
+	ods("DXGI: Injecting Present1");
+	hhPresent1.setup(vfPresent1, reinterpret_cast< voidFunc >(myPresent1));
+}
 
 static HRESULT __stdcall myResize(IDXGISwapChain *pSwapChain, UINT BufferCount, UINT Width, UINT Height,
 								  DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
@@ -161,6 +197,11 @@ void hookDXGI(HMODULE hDXGI, bool preonly) {
 		unsigned char *raw = (unsigned char *) hDXGI;
 		HookPresentRaw((voidFunc)(raw + dxgi->offsetPresent));
 		HookResizeRaw((voidFunc)(raw + dxgi->offsetResize));
+		if (dxgi->offsetPresent1 != 0) {
+			HookPresent1Raw((voidFunc)(raw + dxgi->offsetPresent1));
+		} else {
+			ods("DXGI: no Present1 offset available, skipping Present1 hook");
+		}
 
 	} else if (!preonly) {
 		ods("DXGI: Interface changed, can't rawpatch. Current: %ls ; Previously: %ls", modulename, dxgi->wcFileName);
@@ -185,8 +226,9 @@ extern "C" __declspec(dllexport) void __cdecl PrepareDXGI() {
 	ods("DXGI: Preparing static data for DXGI Injection");
 
 	dxgi->wcFileName[0] = 0;
-	dxgi->offsetPresent = 0;
-	dxgi->offsetResize  = 0;
+	dxgi->offsetPresent  = 0;
+	dxgi->offsetResize   = 0;
+	dxgi->offsetPresent1 = 0;
 
 	// Make sure this is Vista or greater as quite a number of <=WinXP users have fake DX10 libs installed
 	OSVERSIONINFOEXW ovi;
