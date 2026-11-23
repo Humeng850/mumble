@@ -50,6 +50,8 @@ struct DXGIData {
 	wchar_t wcFileName[MODULEFILEPATH_BUFLEN];
 	size_t offsetPresent;
 	size_t offsetResize;
+	/// IDXGISwapChain1::Present1 的偏移（DXGI 1.2+ 的现代引擎走这条路径）
+	size_t offsetPresent1;
 };
 
 struct D3D10Data {
