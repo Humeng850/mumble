@@ -37,6 +37,7 @@
 
 #include "D11StateBlock.h"
 #include "lib.h"
+#include <dxgi1_2.h>
 #include "overlay11.ps.h"
 #include "overlay11.vs.h"
 #include <d3d11.h>
@@ -767,6 +768,37 @@ void PrepareDXGI11(IDXGIAdapter1 *pAdapter, bool initializeDXGIData) {
 								"%d.",
 								dxgi->wcFileName, offset, dxgi->offsetResize);
 						}
+					}
+				}
+
+				// === 补丁：探测 IDXGISwapChain1::Present1 的偏移 ===
+				// IDXGISwapChain 有 18 个方法，IDXGISwapChain1 在其后追加，Present1 是槽位 22。
+				{
+					IDXGISwapChain1 *pSwapChain1 = nullptr;
+					HRESULT hr1 = pSwapChain->QueryInterface(
+						__uuidof(IDXGISwapChain1), reinterpret_cast< void ** >(&pSwapChain1));
+					if (SUCCEEDED(hr1) && pSwapChain1) {
+						void ***vtbl1   = (void ***) pSwapChain1;
+						void *pPresent1 = (*vtbl1)[22];
+						pSwapChain1->Release();
+						boost::optional< size_t > offset1 =
+							GetFnOffsetInModule(reinterpret_cast< voidFunc >(pPresent1), dxgi->wcFileName,
+												ARRAY_NUM_ELEMENTS(dxgi->wcFileName), "D3D11", "Present1");
+						if (offset1) {
+							if (initializeDXGIData || dxgi->offsetPresent1 == 0) {
+								dxgi->offsetPresent1 = *offset1;
+								ods("D3D11: Successfully found Present1 offset: %ls: %d", dxgi->wcFileName,
+									dxgi->offsetPresent1);
+							} else if (dxgi->offsetPresent1 != *offset1) {
+								ods("D3D11: Present1 offset changed: %d -> %d", (int) dxgi->offsetPresent1,
+									(int) *offset1);
+								dxgi->offsetPresent1 = *offset1;
+							}
+						} else {
+							ods("D3D11: Failed to find Present1 offset");
+						}
+					} else {
+						ods("D3D11: SwapChain does not expose IDXGISwapChain1");
 					}
 				}
 
